@@ -15,7 +15,7 @@ INSTANCE_TAG_KEY = "playground-model"
 MODELS: dict[str, dict] = {
     "llama-3.2-1b": {
         "name": "Llama 3.2 1B Instruct",
-        "instance_id": "i-0e7d43d7c43e3c809",
+        "instance_id": "i-0ab3ed10d504f6e86",
         "port": 8080,
         "base_url": "http://13.234.114.58:8080",
         "endpoint": "/chat",
@@ -27,7 +27,7 @@ MODELS: dict[str, dict] = {
     },
     "qwen-2.5-0.5b": {
         "name": "Qwen 2.5 0.5B Instruct",
-        "instance_id": "i-020eb993906c7f528",
+        "instance_id": "i-07a0fa755ee33aa78",
         "port": 8080,
         "base_url": "http://13.235.254.245:8080",
         "endpoint": "/chat",
@@ -39,7 +39,7 @@ MODELS: dict[str, dict] = {
     },
     "gemma-2-2b": {
         "name": "Gemma 2 2B IT",
-        "instance_id": "i-0adbfa11a2c9076ee",
+        "instance_id": "i-00f53f073bc632113",
         "port": 8080,
         "base_url": "http://13.232.241.170:8080",
         "endpoint": "/chat",
