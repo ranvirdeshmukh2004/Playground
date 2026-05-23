@@ -1,29 +1,26 @@
 # 🚀 Private Model Playground
 
-A beautiful, self-hosted LLM chat playground — similar to [Groq Console](https://console.groq.com/playground) — for interacting with your own models running on EC2 instances (via vLLM, TGI, Ollama, or any OpenAI-compatible API).
+A self-hosted LLM chat playground — inspired by [Groq Console](https://console.groq.com/playground) — for chatting with your own open-source models running on AWS EC2 instances.
 
-![Dark themed playground with sidebar, chat, and settings panel](https://img.shields.io/badge/UI-Dark_Theme-6366f1?style=for-the-badge)
-![FastAPI backend](https://img.shields.io/badge/Backend-FastAPI-009688?style=for-the-badge)
-![Streaming](https://img.shields.io/badge/Streaming-SSE-a855f7?style=for-the-badge)
+**No API keys. No third-party services. Everything runs on your infrastructure.**
+
+![Python](https://img.shields.io/badge/Python-3.10+-3776ab?style=flat-square&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat-square&logo=fastapi&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 
 ---
 
 ## ✨ Features
 
-| Feature | Status |
-|---|---|
-| Dark-themed, responsive UI | ✅ |
-| Model selector sidebar with status badges | ✅ |
-| Streaming responses (SSE) | ✅ |
-| Markdown + syntax-highlighted code blocks | ✅ |
-| System prompt configuration | ✅ |
-| Temperature / Max Tokens / Top-P controls | ✅ |
-| Copy message & code block buttons | ✅ |
-| Regenerate last response | ✅ |
-| OpenAI-compatible `/v1/chat/completions` proxy | ✅ |
-| Automatic health-checks every 30 seconds | ✅ |
-| Easy model registration (edit a Python dict) | ✅ |
-| Mobile-responsive layout | ✅ |
+- 🎨 **Groq-style dark UI** — model dropdown, code panel, timer
+- 🔄 **Real-time streaming** via Server-Sent Events (SSE)
+- 📋 **Curl command panel** — auto-generated curl for each model
+- ⏱️ **Response timer** — shows inference duration per query
+- 📊 **Full logging** — every request logged with timestamps
+- 🔌 **OpenAI-compatible** `/v1/chat/completions` proxy endpoint
+- ➕ **Add models at runtime** — no restart needed
+- 📱 **Responsive layout** — sidebar, chat, code panel all resize
+- 🔒 **Private** — no data leaves your AWS account
 
 ---
 
@@ -31,158 +28,226 @@ A beautiful, self-hosted LLM chat playground — similar to [Groq Console](https
 
 ```
 Playground/
-├── main.py              # FastAPI application (backend + routes)
-├── config.py            # Model registry — edit this to add models
-├── requirements.txt     # Python dependencies
-├── README.md            # You are here
+├── main.py                   # FastAPI backend (API routes + SSE streaming)
+├── config.py                 # Model registry (EC2 IPs + endpoints)
+├── requirements.txt          # Python dependencies
 ├── static/
-│   ├── css/
-│   │   └── styles.css   # Custom dark-theme styles
-│   └── js/
-│       └── app.js       # Frontend JavaScript (chat, streaming, etc.)
-└── templates/
-    └── index.html       # Jinja2 HTML template (Tailwind + custom CSS)
+│   ├── css/styles.css        # Groq-style dark theme
+│   └── js/app.js             # Frontend logic (chat, curl panel, timer)
+├── templates/
+│   └── index.html            # HTML template (Tailwind CSS)
+├── deploy/
+│   ├── agent_api.py          # Model server script (runs on each EC2)
+│   ├── nginx.conf            # Nginx reverse proxy config
+│   ├── supervisor.conf       # Supervisor process manager config
+│   └── setup.sh              # EC2 setup script for the Playground server
+└── logs/                     # Auto-generated request logs (gitignored)
 ```
 
 ---
 
-## 🛠 Quick Start
+## 🏗 Architecture
 
-### 1. Clone & install
+```
+┌─────────────┐     ┌──────────────────────┐     ┌─────────────────────┐
+│   Browser   │────▶│  EC2: Playground      │────▶│  EC2: Llama 3.2 1B  │
+│  (User)     │     │  Nginx → Uvicorn      │────▶│  EC2: Qwen 0.5B     │
+│             │◀────│  FastAPI (main.py)     │────▶│  EC2: Gemma 2 2B    │
+└─────────────┘     └──────────────────────┘────▶│  EC2: Phi-4 Mini    │
+                                                  └─────────────────────┘
+```
+
+Each model runs on its own EC2 instance with a FastAPI inference server (`deploy/agent_api.py`). The Playground backend proxies requests and streams responses.
+
+---
+
+## 🚀 Quick Start (Local)
+
+### 1. Clone & Install
 
 ```bash
+git clone https://github.com/ranvirdeshmukh2004/Playground.git
 cd Playground
 python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure your models
+### 2. Configure Models
 
-Open **`config.py`** and edit the `MODELS` dictionary:
+Edit `config.py` with your EC2 instance IPs:
 
 ```python
 MODELS = {
     "llama-3.2-1b": {
         "name": "Llama 3.2 1B Instruct",
-        "host": "10.0.1.10",       # ← your EC2 private IP
-        "port": 8000,              # ← port the model is served on
+        "base_url": "http://YOUR_EC2_IP:8080",
+        "endpoint": "/chat",
         "model_id": "meta-llama/Llama-3.2-1B-Instruct",
-        "description": "Lightweight 1B model, great for quick tasks.",
+        "description": "Lightweight 1B model, fast for simple tasks.",
         "size": "1B",
         "context_len": 8192,
+        "api_type": "custom",
     },
-    # Add more models below...
 }
 ```
-
-Each model needs:
-
-| Field | Description |
-|---|---|
-| `name` | Display name in the UI |
-| `host` | IP address / hostname of the EC2 instance |
-| `port` | Port the model server listens on |
-| `model_id` | Model identifier used by the backend (e.g., vLLM model name) |
-| `description` | Short blurb shown on the model card |
-| `size` | Parameter count label (e.g., `"8B"`, `"70B"`) |
-| `context_len` | Maximum context window length |
-| `api_base` | *(optional)* Override the full base URL instead of using `host:port` |
 
 ### 3. Run
 
 ```bash
-python main.py
+python3 main.py
 ```
 
-Or with Uvicorn directly:
+Open **http://localhost:7860** 🎉
+
+---
+
+## ☁️ Deploy to EC2 + Nginx (Production)
+
+### Step 1: Launch a `t3.micro` EC2 instance (Ubuntu 24.04)
+
+Open ports: **22** (SSH), **80** (HTTP), **443** (HTTPS)
+
+### Step 2: SSH in and set up
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 7860 --reload
+ssh -i your-key.pem ubuntu@YOUR_IP
+
+# Install dependencies
+sudo apt update && sudo apt install -y python3 python3-pip python3-venv git nginx supervisor
+
+# Clone the repo
+git clone https://github.com/ranvirdeshmukh2004/Playground.git ~/playground
+cd ~/playground
+
+# Python environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-Visit **http://localhost:7860** 🎉
+### Step 3: Update config.py with Private IPs
+
+Since the Playground is in the same VPC as your model instances, use **Private IPs** (they don't change on restart):
+
+```bash
+nano config.py
+# Change base_url to Private IPs: "http://172.31.X.X:8080"
+```
+
+### Step 4: Set up Supervisor
+
+```bash
+sudo cp deploy/supervisor.conf /etc/supervisor/conf.d/playground.conf
+sudo supervisorctl reread && sudo supervisorctl update
+sudo supervisorctl start playground
+```
+
+### Step 5: Set up Nginx
+
+```bash
+sudo rm /etc/nginx/sites-enabled/default
+sudo cp deploy/nginx.conf /etc/nginx/sites-available/playground
+sudo ln -s /etc/nginx/sites-available/playground /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl restart nginx
+```
+
+### Step 6: Open `http://YOUR_EC2_IP` ✅
+
+---
+
+## 🖥 Model Server Setup (on each model EC2)
+
+Each model EC2 instance runs `deploy/agent_api.py`:
+
+```bash
+# On each model EC2 instance:
+sudo apt update && sudo apt install -y python3 python3-pip python3-venv
+python3 -m venv ~/llm-env
+source ~/llm-env/bin/activate
+pip install torch transformers fastapi uvicorn
+
+# Copy and edit agent_api.py (set MODEL variable)
+# Then run in tmux:
+tmux new -d -s api "source ~/llm-env/bin/activate && python3 ~/agent_api.py"
+```
 
 ---
 
 ## 🔌 API Endpoints
 
 | Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/` | Serve the frontend |
+|--------|----------|-------------|
+| `GET` | `/` | Serve the frontend UI |
 | `GET` | `/api/models` | List all models with live status |
-| `GET` | `/api/models/{slug}/status` | Health-check a single model |
-| `POST` | `/api/chat` | Simplified chat (streams SSE) |
+| `POST` | `/api/models` | Add a model at runtime |
+| `DELETE` | `/api/models/{slug}` | Remove a model |
+| `POST` | `/api/models/{slug}/test` | Test model connection |
+| `POST` | `/api/chat` | Chat endpoint (SSE stream) |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible proxy |
 
-### Using the OpenAI-compatible endpoint
+### Curl Example
 
-You can point any OpenAI SDK client at your playground:
+```bash
+curl http://localhost:7860/api/chat \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3.2-1b",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 512
+  }'
+```
+
+### OpenAI SDK
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://localhost:7860/v1",
-    api_key="not-needed",
-)
-
+client = OpenAI(base_url="http://localhost:7860/v1", api_key="not-needed")
 response = client.chat.completions.create(
-    model="llama-3.2-1b",       # ← use the slug from config.py
+    model="llama-3.2-1b",
     messages=[{"role": "user", "content": "Hello!"}],
     stream=True,
 )
-
 for chunk in response:
     print(chunk.choices[0].delta.content or "", end="")
 ```
 
 ---
 
-## 🖥 Model Server Setup (on EC2)
+## 📊 Current Models
 
-This playground proxies requests to your model servers. You can use any OpenAI-compatible server:
+| Model | Size | EC2 Type | Inference |
+|-------|------|----------|-----------|
+| Llama 3.2 1B Instruct | 1B | t3.large | ~15-30s |
+| Qwen 2.5 0.5B Instruct | 0.5B | t3.medium | ~5-10s |
+| Gemma 2 2B IT | 2B | t3.large | ~30-60s |
+| Phi-4 Mini Instruct | 3.8B | t3.xlarge | ~60-120s |
 
-### vLLM (recommended)
-
-```bash
-pip install vllm
-python -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Llama-3.2-1B-Instruct \
-    --host 0.0.0.0 \
-    --port 8000
-```
-
-### Ollama
-
-```bash
-ollama serve    # default port 11434
-```
-
-For Ollama, set `api_base` in config:
-
-```python
-"my-ollama-model": {
-    ...
-    "api_base": "http://10.0.1.10:11434/v1",
-}
-```
-
-### Text Generation Inference (TGI)
-
-```bash
-docker run --gpus all -p 8000:80 \
-    ghcr.io/huggingface/text-generation-inference:latest \
-    --model-id meta-llama/Llama-3.2-1B-Instruct
-```
+> Models run on CPU. For GPU inference (2-3s responses), use `g4dn` or `g5` instances.
 
 ---
 
-## 🔒 Security Notes
+## 🔒 Security
 
-- This playground is designed for **private/internal use**. There is no authentication built in.
-- For production, put it behind a reverse proxy (Nginx/Caddy) with HTTPS and basic auth.
-- All requests are proxied server-side — model server ports don't need to be publicly accessible.
+- No authentication built in — intended for private/internal use
+- For production: add Nginx basic auth or put behind a VPN
+- All model traffic stays within your AWS VPC (Private IPs)
+- No data is sent to any external service
+
+---
+
+## 🛠 Tech Stack
+
+| Component | Technology |
+|-----------|-----------|
+| Backend | Python, FastAPI, Uvicorn |
+| Frontend | HTML, Vanilla JavaScript, Tailwind CSS |
+| Model Loading | PyTorch, HuggingFace Transformers |
+| Web Server | Nginx (reverse proxy) |
+| Process Manager | Supervisor |
+| Cloud | AWS EC2 |
 
 ---
 
