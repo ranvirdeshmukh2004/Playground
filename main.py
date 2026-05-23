@@ -35,7 +35,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from config import MODELS
+from config import MODELS, AWS_REGION
 
 # ── Logging setup ────────────────────────────────────────────────────────
 os.makedirs("logs", exist_ok=True)
@@ -324,6 +324,55 @@ async def remove_model(slug: str):
     logger.info(f"MODEL REMOVED: {slug}")
     del _models[slug]
     return {"status": "removed", "slug": slug}
+
+
+# ── Admin: IP Sync (called by Lambda) ────────────────────────────────────
+
+@app.get("/api/admin/instances")
+async def list_instances():
+    """Return instance IDs for all models so Lambda knows what to query."""
+    instances = {}
+    for slug, cfg in _models.items():
+        iid = cfg.get("instance_id")
+        if iid:
+            instances[slug] = {
+                "instance_id": iid,
+                "port": cfg.get("port", 8080),
+                "current_base_url": cfg.get("base_url", ""),
+            }
+    return instances
+
+
+@app.post("/api/admin/sync-ips")
+async def sync_ips(request: Request):
+    """
+    Update model base_urls with fresh Public IPs.
+    Called by the Lambda function after starting instances.
+
+    Body: {"updates": {"i-xxx": "1.2.3.4", "i-yyy": "5.6.7.8", ...}}
+    """
+    body = await request.json()
+    updates = body.get("updates", {})
+
+    if not updates:
+        raise HTTPException(400, "No updates provided")
+
+    synced = []
+    for slug, cfg in _models.items():
+        iid = cfg.get("instance_id")
+        if iid and iid in updates:
+            new_ip = updates[iid]
+            if new_ip:  # instance is running
+                port = cfg.get("port", 8080)
+                old_url = cfg.get("base_url", "")
+                new_url = f"http://{new_ip}:{port}"
+                cfg["base_url"] = new_url
+                logger.info(f"IP SYNC: {slug} ({iid}) → {old_url} → {new_url}")
+                synced.append({"slug": slug, "instance_id": iid, "new_url": new_url})
+            else:
+                logger.warning(f"IP SYNC: {slug} ({iid}) → no IP (instance stopped?)")
+
+    return {"status": "synced", "count": len(synced), "models": synced}
 
 
 @app.post("/api/models/{slug}/test")
