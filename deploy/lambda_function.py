@@ -2,18 +2,18 @@
 AWS Lambda Function — Model Instance Manager
 
 Actions:
-  • list     — List all model instances with status + IPs
-  • start    — Start all model instances, wait for IPs, sync with Playground
-  • stop     — Stop all model instances
-  • sync     — Fetch current IPs and push to Playground
-  • status   — Quick health check of all instances
+  • list     — List all instances (5 total) with status + IPs
+  • start    — Start Playground + 4 model instances, wait, sync IPs
+  • stop     — Stop all 5 instances
+  • status   — Quick health check
 
 Trigger: API Gateway (HTTP API) or direct invocation
 
 Environment Variables:
-  INSTANCE_IDS       — Comma-separated EC2 instance IDs
-  PLAYGROUND_URL     — Playground base URL (e.g. http://3.6.251.189)
-  REGION             — AWS region (default: ap-south-1)
+  MODEL_INSTANCE_IDS      — Comma-separated model EC2 instance IDs (4 models)
+  PLAYGROUND_INSTANCE_ID  — Playground EC2 instance ID (has Elastic IP)
+  PLAYGROUND_URL          — Playground URL (e.g. http://3.6.251.189)
+  REGION                  — AWS region (default: ap-south-1)
 """
 
 import json
@@ -25,11 +25,20 @@ from urllib.error import URLError
 
 # ── Config ───────────────────────────────────────────────────────────────
 
-INSTANCE_IDS = os.environ.get("INSTANCE_IDS", "").split(",")
+MODEL_INSTANCE_IDS = [x.strip() for x in os.environ.get("MODEL_INSTANCE_IDS", "").split(",") if x.strip()]
+PLAYGROUND_INSTANCE_ID = os.environ.get("PLAYGROUND_INSTANCE_ID", "").strip()
 PLAYGROUND_URL = os.environ.get("PLAYGROUND_URL", "http://3.6.251.189")
 REGION = os.environ.get("REGION", "ap-south-1")
 
 ec2 = boto3.client("ec2", region_name=REGION)
+
+
+def _all_instance_ids():
+    """All 5 instance IDs (playground + 4 models)."""
+    ids = list(MODEL_INSTANCE_IDS)
+    if PLAYGROUND_INSTANCE_ID:
+        ids.append(PLAYGROUND_INSTANCE_ID)
+    return ids
 
 
 def lambda_handler(event, context):
@@ -39,7 +48,6 @@ def lambda_handler(event, context):
     query_params = event.get("queryStringParameters") or {}
     body_raw = event.get("body")
 
-    # Parse body (API Gateway sends string, direct invoke sends dict)
     if body_raw and isinstance(body_raw, str):
         try:
             body = json.loads(body_raw)
@@ -48,11 +56,10 @@ def lambda_handler(event, context):
     elif isinstance(body_raw, dict):
         body = body_raw
     elif not body_raw and "action" in event:
-        body = event  # direct invocation
+        body = event
     else:
         body = {}
 
-    # Get action: query string > body > default
     action = query_params.get("action") or body.get("action", "list")
 
     actions = {
@@ -75,13 +82,9 @@ def lambda_handler(event, context):
 
 
 def response(status_code, body):
-    """Format API Gateway response."""
     return {
         "statusCode": status_code,
-        "headers": {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-        },
+        "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
         "body": json.dumps(body, default=str),
     }
 
@@ -89,8 +92,8 @@ def response(status_code, body):
 # ── Actions ──────────────────────────────────────────────────────────────
 
 def action_list(body):
-    """List all model instances with their state and IPs."""
-    ids = _get_instance_ids(body)
+    """List ALL 5 instances with state and IPs."""
+    ids = _all_instance_ids()
     if not ids:
         return {"error": "No instance IDs configured"}
 
@@ -98,63 +101,123 @@ def action_list(body):
     instances = []
     for res in reservations:
         for inst in res["Instances"]:
-            name_tag = next((t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"), "unnamed")
+            iid = inst["InstanceId"]
+            name = next((t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"), "unnamed")
+            is_playground = (iid == PLAYGROUND_INSTANCE_ID)
             instances.append({
-                "instance_id": inst["InstanceId"],
-                "name": name_tag,
+                "instance_id": iid,
+                "name": name,
+                "role": "playground" if is_playground else "model",
                 "state": inst["State"]["Name"],
                 "public_ip": inst.get("PublicIpAddress"),
                 "private_ip": inst.get("PrivateIpAddress"),
                 "instance_type": inst["InstanceType"],
+                "elastic_ip": is_playground,
             })
 
     return {"instances": instances, "count": len(instances)}
 
 
 def action_start(body):
-    """Start all model instances, wait for IPs, then sync with Playground."""
-    ids = _get_instance_ids(body)
-    if not ids:
+    """Start all 5 instances → wait → sync model IPs to Playground."""
+    all_ids = _all_instance_ids()
+    if not all_ids:
         return {"error": "No instance IDs configured"}
 
-    # Start instances
-    ec2.start_instances(InstanceIds=ids)
-    print(f"Starting instances: {ids}")
+    # Step 1: Start ALL instances (playground + models)
+    ec2.start_instances(InstanceIds=all_ids)
+    print(f"[START] Starting {len(all_ids)} instances: {all_ids}")
 
-    # Wait for running state (max 120s)
+    # Step 2: Wait for all to be running
     waiter = ec2.get_waiter("instance_running")
-    waiter.wait(
-        InstanceIds=ids,
-        WaiterConfig={"Delay": 5, "MaxAttempts": 24}
-    )
-    print("All instances running")
+    waiter.wait(InstanceIds=all_ids, WaiterConfig={"Delay": 5, "MaxAttempts": 30})
+    print("[START] All instances running")
 
-    # Small delay for Public IP assignment
-    time.sleep(5)
+    # Step 3: Wait for Playground FastAPI to boot (Supervisor/PM2 auto-starts it)
+    print("[START] Waiting 20s for Playground server to boot...")
+    time.sleep(20)
 
-    # Fetch IPs and sync
-    return action_sync(body)
+    # Step 4: Sync model IPs to Playground
+    sync_result = _sync_model_ips()
+
+    # Step 5: Get final state of all instances
+    reservations = ec2.describe_instances(InstanceIds=all_ids)["Reservations"]
+    instances = []
+    for res in reservations:
+        for inst in res["Instances"]:
+            iid = inst["InstanceId"]
+            name = next((t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"), "unnamed")
+            instances.append({
+                "instance_id": iid,
+                "name": name,
+                "role": "playground" if iid == PLAYGROUND_INSTANCE_ID else "model",
+                "state": inst["State"]["Name"],
+                "public_ip": inst.get("PublicIpAddress"),
+            })
+
+    return {
+        "status": "started",
+        "message": f"All {len(all_ids)} instances started. Model IPs synced to Playground.",
+        "instances": instances,
+        "sync_result": sync_result,
+    }
 
 
 def action_stop(body):
-    """Stop all model instances."""
-    ids = _get_instance_ids(body)
-    if not ids:
+    """Stop ALL 5 instances."""
+    all_ids = _all_instance_ids()
+    if not all_ids:
         return {"error": "No instance IDs configured"}
 
-    ec2.stop_instances(InstanceIds=ids)
-    return {"status": "stopping", "instances": ids}
+    ec2.stop_instances(InstanceIds=all_ids)
+
+    return {
+        "status": "stopping",
+        "message": f"Stopping {len(all_ids)} instances (4 models + playground).",
+        "instances": all_ids,
+    }
 
 
 def action_sync(body):
-    """Fetch current Public IPs and push them to the Playground."""
-    ids = _get_instance_ids(body)
-    if not ids:
+    """Fetch model Public IPs and push to Playground."""
+    return _sync_model_ips()
+
+
+def action_status(body):
+    """Quick status check of all 5 instances."""
+    all_ids = _all_instance_ids()
+    if not all_ids:
         return {"error": "No instance IDs configured"}
 
-    reservations = ec2.describe_instances(InstanceIds=ids)["Reservations"]
+    reservations = ec2.describe_instances(InstanceIds=all_ids)["Reservations"]
+    instances = {}
+    for res in reservations:
+        for inst in res["Instances"]:
+            iid = inst["InstanceId"]
+            name = next((t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"), iid)
+            instances[name] = {
+                "state": inst["State"]["Name"],
+                "ip": inst.get("PublicIpAddress"),
+                "role": "playground" if iid == PLAYGROUND_INSTANCE_ID else "model",
+            }
 
-    # Build instance_id → public_ip mapping
+    all_running = all(s["state"] == "running" for s in instances.values())
+    return {
+        "all_running": all_running,
+        "total": len(instances),
+        "instances": instances,
+    }
+
+
+# ── Internal helpers ─────────────────────────────────────────────────────
+
+def _sync_model_ips():
+    """Fetch model instance IPs and push them to the Playground."""
+    if not MODEL_INSTANCE_IDS:
+        return {"error": "No model instance IDs configured"}
+
+    reservations = ec2.describe_instances(InstanceIds=MODEL_INSTANCE_IDS)["Reservations"]
+
     updates = {}
     details = []
     for res in reservations:
@@ -171,50 +234,21 @@ def action_sync(body):
                 "public_ip": ip,
             })
 
-    # Push to Playground
-    playground_url = body.get("playground_url", PLAYGROUND_URL).rstrip("/")
+    # Push to Playground (Elastic IP — always reachable)
+    playground_url = PLAYGROUND_URL.rstrip("/")
     sync_url = f"{playground_url}/api/admin/sync-ips"
 
     try:
         data = json.dumps({"updates": updates}).encode()
         req = Request(sync_url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(req, timeout=10) as resp:
+        with urlopen(req, timeout=15) as resp:
             sync_result = json.loads(resp.read())
     except URLError as e:
         sync_result = {"error": f"Could not reach Playground at {sync_url}: {str(e)}"}
 
     return {
         "status": "synced",
-        "instances": details,
-        "sync_result": sync_result,
+        "models_synced": len([d for d in details if d["public_ip"]]),
+        "models": details,
+        "playground_response": sync_result,
     }
-
-
-def action_status(body):
-    """Quick status check — is each instance running?"""
-    ids = _get_instance_ids(body)
-    if not ids:
-        return {"error": "No instance IDs configured"}
-
-    reservations = ec2.describe_instances(InstanceIds=ids)["Reservations"]
-    states = {}
-    for res in reservations:
-        for inst in res["Instances"]:
-            name = next((t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"), inst["InstanceId"])
-            states[name] = {
-                "state": inst["State"]["Name"],
-                "ip": inst.get("PublicIpAddress"),
-            }
-
-    all_running = all(s["state"] == "running" for s in states.values())
-    return {"all_running": all_running, "instances": states}
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────
-
-def _get_instance_ids(body):
-    """Get instance IDs from request body or environment."""
-    ids = body.get("instance_ids", [])
-    if not ids:
-        ids = [x.strip() for x in INSTANCE_IDS if x.strip()]
-    return ids
