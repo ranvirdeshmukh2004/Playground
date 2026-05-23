@@ -35,16 +35,25 @@ ec2 = boto3.client("ec2", region_name=REGION)
 def lambda_handler(event, context):
     """Main Lambda entry point."""
 
-    # Support API Gateway (HTTP API) and direct invocation
-    if "body" in event:
+    # Parse action from query string, body, or event
+    query_params = event.get("queryStringParameters") or {}
+    body_raw = event.get("body")
+
+    # Parse body (API Gateway sends string, direct invoke sends dict)
+    if body_raw and isinstance(body_raw, str):
         try:
-            body = json.loads(event["body"]) if isinstance(event["body"], str) else event["body"]
+            body = json.loads(body_raw)
         except (json.JSONDecodeError, TypeError):
             body = {}
-        action = event.get("queryStringParameters", {}).get("action", "list")
+    elif isinstance(body_raw, dict):
+        body = body_raw
+    elif not body_raw and "action" in event:
+        body = event  # direct invocation
     else:
-        body = event
-        action = event.get("action", "list")
+        body = {}
+
+    # Get action: query string > body > default
+    action = query_params.get("action") or body.get("action", "list")
 
     actions = {
         "list": action_list,
